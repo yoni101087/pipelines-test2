@@ -1,0 +1,220 @@
+
+
+template: true   # required for local templates
+valuesFilePath: ./values.yml
+
+resources:
+
+  - name: myGitRepo
+    type: GitRepo
+    configuration:
+      # SCM integration where the repository is located
+      gitProvider: {{ .Values.myRepo.gitProvider }} # this will be replaced from values.yml
+      # Repository path, including org name/repo name
+      path: {{ .Values.myRepo.path }} # this will be replaced from values.yml
+      branches:
+        # Specifies which branches will trigger dependent steps
+        include: main
+
+
+  - name: thisPropertyBag
+    type: PropertyBag
+    configuration:
+      commitSha: 1
+      runID: 1
+      
+#  - name: cron_trigger
+#    type: CronTrigger
+#    configuration:
+#      interval: '0 4 * * *'  
+
+  - name: dbp_image
+    type: Image
+    configuration:
+      registry: artifactoryIntegration                               # <-- replace with your artifactory integration
+      sourceRepository: docker-local               # <-- required if registry is Artifactory
+      imageName: z0jpd308646363.jfrogdev.org/docker-local/dbp  # < -- replace with your image path and name
+      imageTag: latest
+      autoPull: true   
+
+  - name: dbp_build_info
+    type: BuildInfo
+    configuration:
+      sourceArtifactory: artifactoryIntegration
+      buildName: dbp_build
+      buildNumber: 1    
+
+  - name: dbp_promoted_build_info
+    type: BuildInfo
+    configuration:
+      sourceArtifactory: artifactoryIntegration
+      buildName: dbp_build
+      buildNumber: 1
+
+pipelines:
+
+  - name: pipeline_Example
+    configuration:
+      jfrogCliVersion: 2
+      integrations:
+      - name: artifactoryIntegration
+#  environmentVariables:
+    steps:
+      - name: p1_s1
+        type: Bash
+        configuration:
+          inputResources:
+            # Sets up step to be triggered when there are commit events to myGitRepo
+            - name: myGitRepo
+#            - name: cron_trigger
+        execution:
+          onExecute:
+            # Data from input resources is available as env variables in the step
+            - echo $res_myGitRepo_commitSha
+            # The next two commands add variables to run state, which is available to all downstream steps in this run
+            # Run state documentation: https://www.jfrog.com/confluence/display/JFROG/Creating+Stateful+Pipelines#CreatingStatefulPipelines-RunState
+            - add_run_variables current_runid=$run_id
+            - add_run_variables commitSha=$res_myGitRepo_commitSha
+            # This variable is written to pipeline state in p1_s3.
+            # So this will be empty during first run and will be set to prior run number in subsequent runs
+            # Pipeline state documentation: https://www.jfrog.com/confluence/display/JFROG/Creating+Stateful+Pipelines#CreatingStatefulPipelines-PipelineState
+            - echo "Previous run ID is $prev_runid"
+          onStart:
+            - update_run_description "Pipeline of pipelines. First pipeline triggers second pipeline."
+
+      - name: p1_s2
+        type: Bash
+        configuration:
+          inputSteps:
+            - name: p1_s1
+        execution:
+          onExecute:
+            # Demonstrates the availability of an env variable written to run state during p1_s1
+            - echo $current_runid
+
+      - name: p1_s3
+        type: Bash
+        configuration:
+          inputSteps:
+            - name: p1_s2
+          outputResources:
+            - name: thisPropertyBag
+        execution:
+          onExecute:
+            - echo $current_runid
+            # Writes current run number to pipeline state
+            - add_pipeline_variables prev_runid=$run_id
+            # Uses an utility function to update the output resource with the commitSha that triggered this run
+            # Dependent pipelines can be configured to trigger when this resource is updated
+            # Utility functions documentation: https://www.jfrog.com/confluence/display/JFROG/Pipelines+Utility+Functions
+            - write_output thisPropertyBag commitSha=$commitSha runID=$current_runid
+
+
+      - name: pipeline_of_pipelines_2
+        type: Bash
+        configuration:
+          inputResources:
+            # Sets up step to be triggered when thisPropertyBag is updated
+            - name: thisPropertyBag
+        execution:
+          onExecute:
+            # Retrieves the commitSha from input resource
+            - echo "CommitSha is $res_thisPropertyBag_commitSha"
+
+
+      - name: docker_build
+        type: DockerBuild
+        configuration:
+          affinityGroup: dbp_group
+          dockerFileLocation: .
+          dockerFileName: Dockerfile
+          dockerImageName: z0jpd308646363.jfrogdev.org/docker-local/dbp  # replace with your image path and name
+          dockerImageTag: ${run_number}
+          inputResources:
+            - name: myGitRepo
+#            - name: cron_trigger
+        execution:
+          onStart:
+              - update_run_description "Add custom text for every run. Example - Build and push Docker image to Artifactory."
+
+      - name: docker_push
+        type: DockerPush
+        configuration:
+          affinityGroup: dbp_group
+          targetRepository: quickstarts-target-local
+          inputSteps:
+            - name: docker_build
+          outputResources:
+            - name: dbp_image           
+
+      - name: publish_dbp_build
+        type: PublishBuildInfo
+        configuration:
+          inputSteps:
+            - name: docker_push
+          outputResources:
+            - name: dbp_build_info          
+
+      - name: promote_dbp_build
+        type: PromoteBuild
+        configuration:
+          targetRepository: quickstarts-target-local
+          inputResources:
+            - name: dbp_build_info
+          outputResources:
+            - name: dbp_promoted_build_info
+
+
+      - name: Run_container
+        type: Bash
+        configuration:
+          integrations:
+            - name: artifactoryIntegration
+            - name: mypipelines_docker
+          timeoutSeconds: 1800
+          inputSteps:
+            - name: promote_dbp_build
+          runtime:
+            type: image
+            image:
+              custom:
+                registry: mypipelines_docker
+                name: z0jpd308646363.jfrogdev.org/quickstarts-target-local/dbp
+                tag: '9'
+        execution:
+          onExecute:
+            - echo "Test OK"
+
+#     - name: Run_container
+#       type: Bash
+#       configuration:
+#         inputSteps:
+#           - name: promote_dbp_build
+#       execution:
+#         onExecute:
+#           - "docker run -d z0jonathanf2.jfrogdev.org/docker-local/dbp:latest"
+
+
+#      - name: Run_container
+#        type: Bash
+#        configuration:
+#          runtime:
+#            type: image
+#            image:
+#              custom:
+#                name: releases-docker.jfrog.io/jfrog/pipelines-u18node
+#                tag: "16"
+#                autoPull: true
+#          inputSteps:
+#            - name: promote_dbp_build
+#        execution:
+#          onExecute:
+#            - echo "hello world"
+
+
+
+
+
+
+
+

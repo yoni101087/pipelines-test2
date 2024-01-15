@@ -1,0 +1,4 @@
+myRepo:
+  gitProvider: JonathansGithub2
+  path: yoni101087/pipelines-test2
+artifactoryIntegration: artifactoryIntegration
