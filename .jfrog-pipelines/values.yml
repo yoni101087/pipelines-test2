@@ -1,4 +1,4 @@
 myRepo:
-  gitProvider: JonathansGithub2
+  gitProvider: pipelinestest2
   path: yoni101087/pipelines-test2
 artifactoryIntegration: artifactoryIntegration
